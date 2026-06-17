@@ -1,0 +1,29 @@
+# Git files
+.git
+.gitignore
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Maven target directory
+target/
+
+# Docker files (not needed in container)
+Dockerfile
+.dockerignore
+docker-usage.md
+
+# Documentation
+README.md
+*.md
+
+# Build artifacts and logs
+*.log
+*.tmp
+
+# OS generated files
+Thumbs.db
+.DS_Store
