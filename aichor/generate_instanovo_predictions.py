@@ -118,10 +118,16 @@ def subset_mzml(source: Path, target: Path, max_spectra: int) -> Path:
     exp = oms.MSExperiment()
     oms.MzMLFile().load(str(source), exp)
     subset = oms.MSExperiment()
-    for spectrum in exp.getSpectra()[:max_spectra]:
+    count = 0
+    for spectrum in exp.getSpectra():
+        if spectrum.getMSLevel() != 2:
+            continue
         subset.addSpectrum(spectrum)
+        count += 1
+        if count >= max_spectra:
+            break
     oms.MzMLFile().store(str(target), subset)
-    log(f"Wrote first {subset.size()} mzML spectra to {target}")
+    log(f"Wrote first {subset.size()} MS2 mzML spectra to {target}")
     return target
 
 
