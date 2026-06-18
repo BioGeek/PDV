@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from urllib.request import urlretrieve
 
@@ -146,6 +147,71 @@ def run_env(version: str) -> dict[str, str]:
     # Prevent old InstaNovo S3 helpers from auto-uploading local intermediate paths.
     env.pop("AICHOR_LOGS_PATH", None)
     return env
+
+
+def upload_destination_root() -> str | None:
+    output_root = os.environ.get("AICHOR_OUTPUT_PATH")
+    if not output_root:
+        return None
+    return output_root.rstrip("/") + "/" + UPLOAD_PREFIX.strip("/")
+
+
+@lru_cache(maxsize=1)
+def s3_filesystem():
+    import s3fs
+
+    endpoint = os.environ.get("S3_ENDPOINT")
+    return s3fs.S3FileSystem(client_kwargs={"endpoint_url": endpoint} if endpoint else None)
+
+
+def remote_path(path: Path) -> str | None:
+    destination = upload_destination_root()
+    if not destination:
+        return None
+    return destination + "/" + str(path.relative_to(ROOT))
+
+
+def remote_file_size(path: Path) -> int | None:
+    remote = remote_path(path)
+    if remote is None:
+        return None
+
+    try:
+        info = s3_filesystem().info(remote)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if "not found" in str(exc).lower() or "no such" in str(exc).lower():
+            return None
+        raise
+
+    size = info.get("size", info.get("Size"))
+    return int(size) if size is not None else 0
+
+
+def download_remote_file(path: Path) -> bool:
+    size = remote_file_size(path)
+    if not size:
+        return False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    remote = remote_path(path)
+    assert remote is not None
+    log(f"Downloading existing S3 output {remote} -> {path}")
+    s3_filesystem().get(remote, str(path))
+    return True
+
+
+def upload_file(path: Path) -> None:
+    if not path.exists() or not path.is_file():
+        return
+
+    remote = remote_path(path)
+    if remote is None:
+        return
+
+    log(f"Upload {path} -> {remote}")
+    s3_filesystem().put(str(path), remote)
 
 
 def out_path(source: SourceFile, filename: str) -> Path:
@@ -617,9 +683,17 @@ def download_v100_model() -> None:
 
 def run_job(job: PredictionJob, source: SourceFile) -> dict[str, object]:
     job.output_path.parent.mkdir(parents=True, exist_ok=True)
+    if download_remote_file(job.output_path):
+        log(f"Skipping existing S3 prediction {job.output_path.name}")
+        return inspect_output(job, source, "skipped_existing_s3", 0.0, None)
+
     if job.output_path.exists() and job.output_path.stat().st_size > 0:
         log(f"Skipping existing {job.output_path}")
+        upload_file(job.output_path)
         return inspect_output(job, source, "skipped", 0.0, None)
+
+    if job.depends_on is not None and not job.depends_on.exists():
+        download_remote_file(job.depends_on)
 
     if job.depends_on is not None and not job.depends_on.exists():
         message = f"Missing dependency {job.depends_on}"
@@ -649,6 +723,7 @@ def run_job(job: PredictionJob, source: SourceFile) -> dict[str, object]:
         return_code = proc.wait()
 
     elapsed = time.time() - start
+    upload_file(log_path)
     if return_code != 0:
         message = f"Command failed with exit code {return_code}; see {log_path}"
         log(message)
@@ -656,6 +731,14 @@ def run_job(job: PredictionJob, source: SourceFile) -> dict[str, object]:
             raise RuntimeError(message)
         return inspect_output(job, source, "failed", elapsed, message)
 
+    if not job.output_path.exists() or job.output_path.stat().st_size == 0:
+        message = f"Command finished successfully but did not create a non-empty output: {job.output_path}"
+        log(message)
+        if not CONTINUE_ON_ERROR:
+            raise RuntimeError(message)
+        return inspect_output(job, source, "failed_missing_output", elapsed, message)
+
+    upload_file(job.output_path)
     return inspect_output(job, source, "succeeded", elapsed, None)
 
 
@@ -694,30 +777,22 @@ def inspect_output(
 
 
 def upload_outputs() -> None:
-    output_root = os.environ.get("AICHOR_OUTPUT_PATH")
-    if not output_root:
+    destination = upload_destination_root()
+    if not destination:
         log("AICHOR_OUTPUT_PATH is not set; leaving outputs on local filesystem")
         return
 
-    import s3fs
-
-    endpoint = os.environ.get("S3_ENDPOINT")
-    destination = output_root.rstrip("/") + "/" + UPLOAD_PREFIX.strip("/")
     log(f"Uploading outputs to {destination}")
-    fs = s3fs.S3FileSystem(client_kwargs={"endpoint_url": endpoint} if endpoint else None)
     for local_root in (OUT_DIR, LOG_DIR):
         if not local_root.exists():
             continue
         for path in local_root.rglob("*"):
             if not path.is_file():
                 continue
-            rel = path.relative_to(ROOT)
-            remote = destination + "/" + str(rel)
-            log(f"Upload {path} -> {remote}")
-            fs.put(str(path), remote)
+            upload_file(path)
 
 
-def write_manifest(results: list[dict[str, object]]) -> None:
+def write_manifest(results: list[dict[str, object]]) -> list[Path]:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     manifest = {
         "mode": "smoke-first10" if MAX_SPECTRA > 0 else "full",
@@ -728,8 +803,10 @@ def write_manifest(results: list[dict[str, object]]) -> None:
         "mzml_url": MZML_URL,
         "results": results,
     }
-    (OUT_DIR / "prediction_manifest.json").write_text(json.dumps(manifest, indent=2))
-    with (OUT_DIR / "prediction_manifest.csv").open("w", newline="") as handle:
+    manifest_json = OUT_DIR / "prediction_manifest.json"
+    manifest_csv = OUT_DIR / "prediction_manifest.csv"
+    manifest_json.write_text(json.dumps(manifest, indent=2))
+    with manifest_csv.open("w", newline="") as handle:
         fieldnames = [
             "status",
             "source_format",
@@ -747,6 +824,7 @@ def write_manifest(results: list[dict[str, object]]) -> None:
         writer.writeheader()
         for result in results:
             writer.writerow({field: result.get(field) for field in fieldnames})
+    return [manifest_json, manifest_csv]
 
 
 def main() -> int:
@@ -763,10 +841,12 @@ def main() -> int:
     for source in sources:
         for job in build_jobs(source):
             results.append(run_job(job, source))
-            write_manifest(results)
+            for manifest_path in write_manifest(results):
+                upload_file(manifest_path)
 
-    failures = [r for r in results if r["status"] not in {"succeeded", "skipped"}]
-    write_manifest(results)
+    failures = [r for r in results if r["status"] not in {"succeeded", "skipped", "skipped_existing_s3"}]
+    for manifest_path in write_manifest(results):
+        upload_file(manifest_path)
     upload_outputs()
 
     if failures:
