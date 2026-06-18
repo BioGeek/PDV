@@ -67,6 +67,10 @@ def ensure_dirs() -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
+def run_label() -> str:
+    return f"first{MAX_SPECTRA}" if MAX_SPECTRA > 0 else "full"
+
+
 def download_and_gunzip(url: str, target: Path) -> Path:
     gz_path = target.with_suffix(target.suffix + ".gz")
     if not gz_path.exists():
@@ -135,7 +139,7 @@ def prepare_inputs() -> list[SourceFile]:
     mgf = download_and_gunzip(MGF_URL, INPUT_DIR / "SF_200217_U2OS_TiO2_HCD_OT_rep1.mgf")
     mzml = download_and_gunzip(MZML_URL, INPUT_DIR / "SF_200217_U2OS_TiO2_HCD_OT_rep1.mzML")
 
-    suffix = f"first{MAX_SPECTRA}" if MAX_SPECTRA > 0 else "full"
+    suffix = run_label()
     mgf_input = subset_mgf(mgf, WORK_DIR / f"SF_200217_U2OS_TiO2_HCD_OT_rep1.{suffix}.mgf", MAX_SPECTRA)
     mzml_input = subset_mzml(mzml, WORK_DIR / f"SF_200217_U2OS_TiO2_HCD_OT_rep1.{suffix}.mzML", MAX_SPECTRA)
 
@@ -162,6 +166,36 @@ def upload_destination_root() -> str | None:
     return output_root.rstrip("/") + "/" + UPLOAD_PREFIX.strip("/")
 
 
+def checkpoint_destination_root() -> str | None:
+    configured = os.environ.get("PDV_INSTANOVO_CHECKPOINT_PATH")
+    if configured:
+        return configured.rstrip("/")
+
+    output_root = os.environ.get("AICHOR_OUTPUT_PATH")
+    if not output_root:
+        return None
+
+    parent = output_root.rstrip("/").rsplit("/", 1)[0]
+    return parent + "/_checkpoints/" + UPLOAD_PREFIX.strip("/") + "/" + run_label()
+
+
+def output_roots() -> list[str]:
+    roots: list[str] = []
+    for root in (upload_destination_root(), checkpoint_destination_root()):
+        if root and root not in roots:
+            roots.append(root)
+    return roots
+
+
+def lookup_roots() -> list[str]:
+    roots = output_roots()
+    for configured in os.environ.get("PDV_INSTANOVO_RESUME_ROOTS", "").split(","):
+        configured = configured.strip().rstrip("/")
+        if configured and configured not in roots:
+            roots.append(configured)
+    return roots
+
+
 @lru_cache(maxsize=1)
 def s3_filesystem():
     import s3fs
@@ -170,18 +204,11 @@ def s3_filesystem():
     return s3fs.S3FileSystem(client_kwargs={"endpoint_url": endpoint} if endpoint else None)
 
 
-def remote_path(path: Path) -> str | None:
-    destination = upload_destination_root()
-    if not destination:
-        return None
-    return destination + "/" + str(path.relative_to(ROOT))
+def remote_path(root: str, path: Path) -> str:
+    return root.rstrip("/") + "/" + str(path.relative_to(ROOT))
 
 
-def remote_file_size(path: Path) -> int | None:
-    remote = remote_path(path)
-    if remote is None:
-        return None
-
+def remote_file_size(remote: str) -> int | None:
     try:
         info = s3_filesystem().info(remote)
     except FileNotFoundError:
@@ -196,28 +223,31 @@ def remote_file_size(path: Path) -> int | None:
 
 
 def download_remote_file(path: Path) -> bool:
-    size = remote_file_size(path)
-    if not size:
-        return False
+    for root in lookup_roots():
+        remote = remote_path(root, path)
+        size = remote_file_size(remote)
+        if not size:
+            continue
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    remote = remote_path(path)
-    assert remote is not None
-    log(f"Downloading existing S3 output {remote} -> {path}")
-    s3_filesystem().get(remote, str(path))
-    return True
+        path.parent.mkdir(parents=True, exist_ok=True)
+        log(f"Downloading existing S3 output {remote} -> {path}")
+        s3_filesystem().get(remote, str(path))
+        return True
+    return False
 
 
 def upload_file(path: Path) -> None:
     if not path.exists() or not path.is_file():
         return
 
-    remote = remote_path(path)
-    if remote is None:
+    roots = output_roots()
+    if not roots:
         return
 
-    log(f"Upload {path} -> {remote}")
-    s3_filesystem().put(str(path), remote)
+    for root in roots:
+        remote = remote_path(root, path)
+        log(f"Upload {path} -> {remote}")
+        s3_filesystem().put(str(path), remote)
 
 
 def out_path(source: SourceFile, filename: str) -> Path:
