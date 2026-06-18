@@ -9,7 +9,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from urllib.parse import quote
 
@@ -20,8 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = REPO_ROOT / "aichor" / "generate_instanovo_predictions.py"
 DEFAULT_TITLE = "PDV InstaNovo v1+ prediction sample files"
 DEFAULT_DESCRIPTION = (
-    "Full InstaNovo prediction CSV outputs generated from the MGF and mzML files "
-    "requested for validating PDV InstaNovo import support."
+    "InstaNovo prediction CSV outputs generated from the MGF and mzML files "
+    "for validating PDV InstaNovo import support."
 )
 
 
@@ -47,10 +46,6 @@ def load_runner_module():
     return module
 
 
-def relative_archive_name(path: Path) -> str:
-    return path.name
-
-
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -62,13 +57,6 @@ def sha256_file(path: Path) -> str:
 def run_command(command: list[str], cwd: Path | None = None) -> None:
     print("+ " + shlex.join(command), flush=True)
     subprocess.run(command, cwd=str(cwd) if cwd else None, check=True)
-
-
-def git_value(args: list[str]) -> str:
-    try:
-        return subprocess.check_output(["git", *args], cwd=REPO_ROOT, text=True).strip()
-    except Exception:
-        return "unknown"
 
 
 def display_command(command: list[str], source_path: Path, output_path: Path) -> str:
@@ -120,20 +108,17 @@ def prediction_table() -> str:
     return "\n".join(rows)
 
 
-def write_readme(output_dir: Path, experiment_id: str | None) -> Path:
+def write_readme(output_dir: Path) -> Path:
     runner = load_runner_module()
-    commit = git_value(["rev-parse", "HEAD"])
-    branch = git_value(["branch", "--show-current"])
     readme = output_dir / "README.md"
-    experiment_text = experiment_id or "not recorded"
     readme.write_text(
         "\n".join(
             [
                 "# PDV InstaNovo v1+ Prediction Sample Files",
                 "",
-                "This dataset contains full InstaNovo prediction CSV outputs generated for testing PDV InstaNovo import support.",
+                "This dataset contains InstaNovo prediction CSV outputs generated from the MGF and mzML files for validating PDV InstaNovo import support.",
                 "",
-                "The outputs were generated for both input file formats requested in the PDV pull request discussion.",
+                "The outputs were generated for both input file formats used for validation.",
                 "",
                 "## Input Files",
                 "",
@@ -146,13 +131,10 @@ def write_readme(output_dir: Path, experiment_id: str | None) -> Path:
                 "",
                 "## Generation",
                 "",
-                f"- PDV fork branch: `{branch}`",
-                f"- PDV fork commit: `{commit}`",
-                f"- Aichor experiment ID: `{experiment_text}`",
-                "- GPU requested by the Aichor manifest: `NVIDIA-H100-80GB-HBM3`",
+                "- Predictions were run on a `NVIDIA H100 80GB HBM3` GPU.",
                 "- The full run used `PDV_INSTANOVO_MAX_SPECTRA=0`, so no spectrum truncation was applied.",
                 "",
-                "The command table uses `<input>` and `<output>` placeholders for the concrete input and output paths inside the Aichor container.",
+                "The command table uses `<input>` and `<output>` placeholders for the concrete input and output paths inside the prediction runtime.",
                 "",
                 "## Prediction Files and Commands",
                 "",
@@ -162,10 +144,8 @@ def write_readme(output_dir: Path, experiment_id: str | None) -> Path:
                 "",
                 "- `pdv-instanovo-v1plus-full-mgf-predictions.tar.zst`: full MGF prediction CSV outputs.",
                 "- `pdv-instanovo-v1plus-full-mzml-predictions.tar.zst`: full mzML prediction CSV outputs.",
-                "- `prediction_manifest.csv` and `prediction_manifest.json`: Aichor runner output manifests.",
+                "- `prediction_manifest.csv` and `prediction_manifest.json`: prediction runner output manifests.",
                 "- `SHA256SUMS`: checksums for uploaded files.",
-                "",
-                "The first-10 smoke-test validation artifacts are intentionally not included in this Zenodo record.",
                 "",
             ]
         )
@@ -213,9 +193,9 @@ def write_checksums(paths: list[Path], output_dir: Path) -> Path:
     return checksum_path
 
 
-def prepare_upload_files(predictions_dir: Path, output_dir: Path, experiment_id: str | None) -> list[Path]:
+def prepare_upload_files(predictions_dir: Path, output_dir: Path) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    readme = write_readme(output_dir, experiment_id)
+    readme = write_readme(output_dir)
     manifests = copy_manifest_files(predictions_dir, output_dir)
     archives = [
         create_archive(predictions_dir, output_dir, "mgf"),
@@ -297,7 +277,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Package full InstaNovo predictions and upload them to a Zenodo draft.")
     parser.add_argument("predictions_dir", type=Path, help="Downloaded full predictions directory containing full/mgf and full/mzml.")
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/pdv-zenodo-instanovo"), help="Local bundle directory.")
-    parser.add_argument("--experiment-id", default=os.environ.get("AICHOR_EXPERIMENT_ID"), help="Aichor experiment ID to record in README.")
     parser.add_argument("--zenodo-url", default=os.environ.get("ZENODO_URL", "https://zenodo.org"), help="Zenodo base URL.")
     parser.add_argument("--deposition-id", default=os.environ.get("ZENODO_DEPOSITION_ID"), help="Existing draft deposition ID to upload to.")
     parser.add_argument("--title", default=DEFAULT_TITLE, help="Zenodo draft title when creating a new deposition.")
@@ -310,7 +289,7 @@ def main() -> int:
     if not (predictions_dir / "full" / "mgf").is_dir() or not (predictions_dir / "full" / "mzml").is_dir():
         raise FileNotFoundError("predictions_dir must contain full/mgf and full/mzml directories")
 
-    upload_files = prepare_upload_files(predictions_dir, args.output_dir.resolve(), args.experiment_id)
+    upload_files = prepare_upload_files(predictions_dir, args.output_dir.resolve())
     print("Prepared upload files:")
     for path in upload_files:
         print(f"  {path}")
