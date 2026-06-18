@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
       git \
       jq \
+      libglib2.0-0 \
+      libgl1 \
       tini \
       unzip \
       wget \
@@ -33,6 +35,8 @@ RUN "${INOVO_VENV}/bin/python" -m pip install -e "${INOVO_ROOT}/1.2.2" \
     && "${INOVO_VENV}/bin/python" - <<'PY'
 import torch
 print("torch", torch.__version__, "cuda_available", torch.cuda.is_available())
+import pyopenms
+print("pyopenms", pyopenms.__version__)
 PY
 
 WORKDIR /workspace
