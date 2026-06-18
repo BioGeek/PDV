@@ -348,17 +348,25 @@ def edit_distance(a: str, b: str) -> int:
     return previous[-1]
 
 
-def compare_prediction_maps(left: dict[str, Prediction], right: dict[str, Prediction]) -> dict[str, float | int]:
+def compare_prediction_maps(
+    left: dict[str, Prediction],
+    right: dict[str, Prediction],
+    max_edit_distance_samples: int,
+) -> dict[str, float | int]:
     scans = set(left) | set(right)
-    common = set(left) & set(right)
+    common = sorted(set(left) & set(right))
     left_missing = len(scans - set(left))
     right_missing = len(scans - set(right))
     both_predicted = [scan for scan in common if left[scan].peptide and right[scan].peptide]
     exact = sum(1 for scan in both_predicted if left[scan].peptide == right[scan].peptide)
+    mismatch_count = len(both_predicted) - exact
+    sample_step = max(1, math.ceil(mismatch_count / max_edit_distance_samples)) if max_edit_distance_samples else 1
     distances = [
         edit_distance(left[scan].peptide, right[scan].peptide)
-        for scan in both_predicted
-        if left[scan].peptide != right[scan].peptide
+        for mismatch_index, scan in enumerate(
+            scan for scan in both_predicted if left[scan].peptide != right[scan].peptide
+        )
+        if mismatch_index % sample_step == 0 and mismatch_index // sample_step < max_edit_distance_samples
     ]
     score_diffs = [
         right[scan].score - left[scan].score
@@ -375,13 +383,47 @@ def compare_prediction_maps(left: dict[str, Prediction], right: dict[str, Predic
         "right_missing": right_missing,
         "left_missing_rate": left_missing / len(scans) if scans else 0.0,
         "right_missing_rate": right_missing / len(scans) if scans else 0.0,
-        "mismatch_count": len(distances),
+        "mismatch_count": mismatch_count,
+        "edit_distance_sample_size": len(distances),
         "mean_mismatch_edit_distance": mean(distances) or 0.0,
         "median_mismatch_edit_distance": quantile(distances, 0.5) or 0.0,
         "median_score_diff": quantile(score_diffs, 0.5) or 0.0,
         "median_abs_score_diff": quantile(abs_score_diffs, 0.5) or 0.0,
         "p90_abs_score_diff": quantile(abs_score_diffs, 0.9) or 0.0,
     }
+
+
+def even_sample(values: list[object], max_samples: int) -> list[object]:
+    if len(values) <= max_samples:
+        return values
+    step = math.ceil(len(values) / max_samples)
+    return [value for index, value in enumerate(values) if index % step == 0][:max_samples]
+
+
+def comparison_samples(
+    left: dict[str, Prediction],
+    right: dict[str, Prediction],
+    max_samples: int,
+) -> tuple[list[int], list[float]]:
+    common = sorted(set(left) & set(right))
+    mismatches = [scan for scan in common if left[scan].peptide and right[scan].peptide and left[scan].peptide != right[scan].peptide]
+    score_scans = [
+        scan
+        for scan in common
+        if left[scan].peptide
+        and right[scan].peptide
+        and left[scan].score is not None
+        and right[scan].score is not None
+    ]
+    edit_distances = [
+        edit_distance(left[scan].peptide, right[scan].peptide)
+        for scan in even_sample(mismatches, max_samples)
+    ]
+    score_diffs = [
+        right[scan].score - left[scan].score
+        for scan in even_sample(score_scans, max_samples)
+    ]
+    return edit_distances, score_diffs
 
 
 def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
@@ -517,7 +559,7 @@ def heatmap(path: Path, title: str, labels: list[str], matrix: list[list[float]]
     path.write_text("\n".join(lines))
 
 
-def make_report(path: Path, summary_rows: list[dict[str, object]], output_dir: Path) -> None:
+def make_report(path: Path, summary_rows: list[dict[str, object]], output_dir: Path, max_edit_distance_samples: int) -> None:
     total_files = len(summary_rows)
     total_rows = sum(int(row["rows"]) for row in summary_rows)
     total_accepted = sum(int(row["accepted_rows"]) for row in summary_rows)
@@ -527,6 +569,9 @@ def make_report(path: Path, summary_rows: list[dict[str, object]], output_dir: P
         f"Prediction files analyzed: {total_files}",
         f"Rows analyzed: {total_rows}",
         f"Rows with non-empty predictions: {total_accepted}",
+        "",
+        "Exact match, missing-prediction, coverage, score, peptide length, and modification summaries are computed over all rows. Edit-distance distributions use an even deterministic sample of up to "
+        f"{max_edit_distance_samples} mismatched predictions per comparison; each CSV records the exact mismatch count and edit-distance sample size.",
         "",
         "## Plots",
         "",
@@ -574,6 +619,12 @@ def make_matplotlib_plots(
     format_rows: list[dict[str, object]],
     refinement_rows: list[dict[str, object]],
     beam_rows: list[dict[str, object]],
+    format_edit_rows: list[dict[str, object]],
+    format_score_rows: list[dict[str, object]],
+    refinement_edit_rows: list[dict[str, object]],
+    refinement_score_rows: list[dict[str, object]],
+    beam_edit_rows: list[dict[str, object]],
+    beam_score_rows: list[dict[str, object]],
     by_config: dict[tuple[str, str], list[Prediction]],
     all_mods: Counter[str],
 ) -> None:
@@ -696,6 +747,25 @@ def make_matplotlib_plots(
         plt.title("MGF vs mzML median absolute score/confidence difference")
         save_current("format_score_difference.png")
 
+        format_edit_df = pd.DataFrame(format_edit_rows)
+        if not format_edit_df.empty:
+            format_edit_df["edit_distance"] = pd.to_numeric(format_edit_df["edit_distance"])
+            plt.figure(figsize=(max(12, format_edit_df["job_id"].nunique() * 0.45), 6))
+            sns.boxplot(data=format_edit_df, x="job_id", y="edit_distance", showfliers=False)
+            plt.xticks(rotation=70, ha="right")
+            plt.title("MGF vs mzML edit-distance distribution for mismatched predictions")
+            save_current("format_mismatch_edit_distance_distribution.png")
+
+        format_score_df = pd.DataFrame(format_score_rows)
+        if not format_score_df.empty:
+            format_score_df["score_diff"] = pd.to_numeric(format_score_df["score_diff"])
+            plt.figure(figsize=(max(12, format_score_df["job_id"].nunique() * 0.45), 6))
+            sns.boxplot(data=format_score_df, x="job_id", y="score_diff", showfliers=False)
+            plt.axhline(0, color="#444", linewidth=1)
+            plt.xticks(rotation=70, ha="right")
+            plt.title("MGF vs mzML score/log-probability difference distribution")
+            save_current("format_score_difference_distribution.png")
+
         refined_lookup = {
             meta.job_id: "refined" if meta.refined else "not refined"
             for meta in build_metadata().values()
@@ -727,6 +797,25 @@ def make_matplotlib_plots(
         plt.title("Median score/confidence shift after refinement")
         save_current("refinement_score_shift.png")
 
+        refinement_edit_df = pd.DataFrame(refinement_edit_rows)
+        if not refinement_edit_df.empty:
+            refinement_edit_df["edit_distance"] = pd.to_numeric(refinement_edit_df["edit_distance"])
+            plt.figure(figsize=(max(10, refinement_edit_df["label"].nunique() * 0.65), 6))
+            sns.boxplot(data=refinement_edit_df, x="label", y="edit_distance", hue="input_format", showfliers=False)
+            plt.xticks(rotation=60, ha="right")
+            plt.title("Sequence edit-distance distribution after refinement")
+            save_current("refinement_edit_distance_distribution.png")
+
+        refinement_score_df = pd.DataFrame(refinement_score_rows)
+        if not refinement_score_df.empty:
+            refinement_score_df["score_diff"] = pd.to_numeric(refinement_score_df["score_diff"])
+            plt.figure(figsize=(max(10, refinement_score_df["label"].nunique() * 0.65), 6))
+            sns.boxplot(data=refinement_score_df, x="label", y="score_diff", hue="input_format", showfliers=False)
+            plt.axhline(0, color="#444", linewidth=1)
+            plt.xticks(rotation=60, ha="right")
+            plt.title("Score/log-probability shift distribution after refinement")
+            save_current("refinement_score_shift_distribution.png")
+
     beam_df = pd.DataFrame(beam_rows)
     if not beam_df.empty:
         beam_df["changed_rate"] = 1 - pd.to_numeric(beam_df["exact_match_rate"])
@@ -737,11 +826,36 @@ def make_matplotlib_plots(
         plt.title("Prediction changes for beam search vs greedy")
         save_current("beam_vs_greedy_changed_prediction_rate.png")
 
+        beam_edit_df = pd.DataFrame(beam_edit_rows)
+        if not beam_edit_df.empty:
+            beam_edit_df["edit_distance"] = pd.to_numeric(beam_edit_df["edit_distance"])
+            plt.figure(figsize=(max(10, beam_edit_df["label"].nunique() * 0.65), 6))
+            sns.boxplot(data=beam_edit_df, x="label", y="edit_distance", hue="input_format", showfliers=False)
+            plt.xticks(rotation=60, ha="right")
+            plt.title("Sequence edit-distance distribution for beam search vs greedy")
+            save_current("beam_vs_greedy_edit_distance_distribution.png")
+
+        beam_score_df = pd.DataFrame(beam_score_rows)
+        if not beam_score_df.empty:
+            beam_score_df["score_diff"] = pd.to_numeric(beam_score_df["score_diff"])
+            plt.figure(figsize=(max(10, beam_score_df["label"].nunique() * 0.65), 6))
+            sns.boxplot(data=beam_score_df, x="label", y="score_diff", hue="input_format", showfliers=False)
+            plt.axhline(0, color="#444", linewidth=1)
+            plt.xticks(rotation=60, ha="right")
+            plt.title("Score/log-probability difference distribution for beam search vs greedy")
+            save_current("beam_vs_greedy_score_difference_distribution.png")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate InstaNovo prediction behavior and format consistency plots.")
     parser.add_argument("predictions_dir", type=Path, help="Directory containing full/mgf and full/mzml prediction CSVs.")
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/pdv-instanovo-plots"), help="Directory for CSV summaries and SVG plots.")
+    parser.add_argument(
+        "--max-edit-distance-samples",
+        type=int,
+        default=2000,
+        help="Maximum mismatched predictions per comparison used for edit-distance statistics. Exact match and missing rates are always exact.",
+    )
     args = parser.parse_args()
 
     predictions_dir = args.predictions_dir.resolve()
@@ -799,6 +913,8 @@ def main() -> int:
         raise RuntimeError(
             f"No prediction files under {predictions_dir / 'full'} matched the expected full-run filenames."
         )
+    if args.max_edit_distance_samples < 1:
+        raise ValueError("--max-edit-distance-samples must be at least 1")
 
     summary_fields = [
         "input_format",
@@ -867,16 +983,17 @@ def main() -> int:
     pairwise_rows: list[dict[str, object]] = []
     for input_format in sorted({key[0] for key in by_config}):
         keys = sorted([key for key in by_config if key[0] == input_format], key=lambda key: key[1])
+        prediction_maps = {key: {pred.scan: pred for pred in by_config[key]} for key in keys}
         labels = [key[1] for key in keys]
         exact_matrix: list[list[float]] = []
         edit_matrix: list[list[float]] = []
         for left_key in keys:
             exact_row: list[float] = []
             edit_row: list[float] = []
-            left_map = {pred.scan: pred for pred in by_config[left_key]}
+            left_map = prediction_maps[left_key]
             for right_key in keys:
-                right_map = {pred.scan: pred for pred in by_config[right_key]}
-                stats = compare_prediction_maps(left_map, right_map)
+                right_map = prediction_maps[right_key]
+                stats = compare_prediction_maps(left_map, right_map, args.max_edit_distance_samples)
                 exact_row.append(float(stats["exact_match_rate"]))
                 edit_row.append(float(stats["mean_mismatch_edit_distance"]))
                 pairwise_rows.append(
@@ -920,6 +1037,7 @@ def main() -> int:
             "left_missing_rate",
             "right_missing_rate",
             "mismatch_count",
+            "edit_distance_sample_size",
             "mean_mismatch_edit_distance",
             "median_mismatch_edit_distance",
             "median_score_diff",
@@ -929,12 +1047,17 @@ def main() -> int:
     )
 
     format_rows: list[dict[str, object]] = []
+    format_edit_rows: list[dict[str, object]] = []
+    format_score_rows: list[dict[str, object]] = []
     for job_id in sorted({key[1] for key in by_config}):
         mgf = {pred.scan: pred for pred in by_config.get(("mgf", job_id), [])}
         mzml = {pred.scan: pred for pred in by_config.get(("mzml", job_id), [])}
         if not mgf or not mzml:
             continue
-        format_rows.append({"job_id": job_id, **compare_prediction_maps(mgf, mzml)})
+        format_rows.append({"job_id": job_id, **compare_prediction_maps(mgf, mzml, args.max_edit_distance_samples)})
+        edit_distances, score_diffs = comparison_samples(mgf, mzml, args.max_edit_distance_samples)
+        format_edit_rows.extend({"job_id": job_id, "edit_distance": value} for value in edit_distances)
+        format_score_rows.extend({"job_id": job_id, "score_diff": value, "abs_score_diff": abs(value)} for value in score_diffs)
     write_csv(
         output_dir / "format_consistency.csv",
         format_rows,
@@ -949,6 +1072,7 @@ def main() -> int:
             "left_missing_rate",
             "right_missing_rate",
             "mismatch_count",
+            "edit_distance_sample_size",
             "mean_mismatch_edit_distance",
             "median_mismatch_edit_distance",
             "median_score_diff",
@@ -956,6 +1080,8 @@ def main() -> int:
             "p90_abs_score_diff",
         ],
     )
+    write_csv(output_dir / "format_mismatch_edit_distance_samples.csv", format_edit_rows, ["job_id", "edit_distance"])
+    write_csv(output_dir / "format_score_difference_samples.csv", format_score_rows, ["job_id", "score_diff", "abs_score_diff"])
     bar_chart(
         output_dir / "format_exact_match_rate.svg",
         "MGF vs mzML exact peptide match rate by configuration",
@@ -1018,14 +1144,39 @@ def main() -> int:
         "1.2.2-combined-refined": "1.2.2-transformer-beams5",
     }
     refinement_rows: list[dict[str, object]] = []
+    refinement_edit_rows: list[dict[str, object]] = []
+    refinement_score_rows: list[dict[str, object]] = []
     for input_format in ("mgf", "mzml"):
         for refined_job, base_job in refinement_pairs.items():
             refined = {pred.scan: pred for pred in by_config.get((input_format, refined_job), [])}
             base = {pred.scan: pred for pred in by_config.get((input_format, base_job), [])}
             if not refined or not base:
                 continue
-            stats = compare_prediction_maps(base, refined)
+            stats = compare_prediction_maps(base, refined, args.max_edit_distance_samples)
             refinement_rows.append({"input_format": input_format, "base_job_id": base_job, "refined_job_id": refined_job, **stats})
+            edit_distances, score_diffs = comparison_samples(base, refined, args.max_edit_distance_samples)
+            label = f"{input_format} {refined_job}"
+            refinement_edit_rows.extend(
+                {
+                    "input_format": input_format,
+                    "base_job_id": base_job,
+                    "refined_job_id": refined_job,
+                    "label": label,
+                    "edit_distance": value,
+                }
+                for value in edit_distances
+            )
+            refinement_score_rows.extend(
+                {
+                    "input_format": input_format,
+                    "base_job_id": base_job,
+                    "refined_job_id": refined_job,
+                    "label": label,
+                    "score_diff": value,
+                    "abs_score_diff": abs(value),
+                }
+                for value in score_diffs
+            )
     write_csv(
         output_dir / "refinement_effects.csv",
         refinement_rows,
@@ -1042,12 +1193,23 @@ def main() -> int:
             "left_missing_rate",
             "right_missing_rate",
             "mismatch_count",
+            "edit_distance_sample_size",
             "mean_mismatch_edit_distance",
             "median_mismatch_edit_distance",
             "median_score_diff",
             "median_abs_score_diff",
             "p90_abs_score_diff",
         ],
+    )
+    write_csv(
+        output_dir / "refinement_edit_distance_samples.csv",
+        refinement_edit_rows,
+        ["input_format", "base_job_id", "refined_job_id", "label", "edit_distance"],
+    )
+    write_csv(
+        output_dir / "refinement_score_difference_samples.csv",
+        refinement_score_rows,
+        ["input_format", "base_job_id", "refined_job_id", "label", "score_diff", "abs_score_diff"],
     )
     refinement_plot_rows = [
         {"label": f"{row['input_format']} {row['refined_job_id']}", "changed_rate": 1 - float(row["exact_match_rate"])}
@@ -1070,14 +1232,39 @@ def main() -> int:
         "1.2.2-transformer-beams5": "1.2.2-transformer-greedy",
     }
     beam_rows: list[dict[str, object]] = []
+    beam_edit_rows: list[dict[str, object]] = []
+    beam_score_rows: list[dict[str, object]] = []
     for input_format in ("mgf", "mzml"):
         for beam_job, greedy_job in beam_pairs.items():
             beam = {pred.scan: pred for pred in by_config.get((input_format, beam_job), [])}
             greedy = {pred.scan: pred for pred in by_config.get((input_format, greedy_job), [])}
             if not beam or not greedy:
                 continue
-            stats = compare_prediction_maps(greedy, beam)
+            stats = compare_prediction_maps(greedy, beam, args.max_edit_distance_samples)
             beam_rows.append({"input_format": input_format, "greedy_job_id": greedy_job, "beam_job_id": beam_job, **stats})
+            edit_distances, score_diffs = comparison_samples(greedy, beam, args.max_edit_distance_samples)
+            label = f"{input_format} {beam_job}"
+            beam_edit_rows.extend(
+                {
+                    "input_format": input_format,
+                    "greedy_job_id": greedy_job,
+                    "beam_job_id": beam_job,
+                    "label": label,
+                    "edit_distance": value,
+                }
+                for value in edit_distances
+            )
+            beam_score_rows.extend(
+                {
+                    "input_format": input_format,
+                    "greedy_job_id": greedy_job,
+                    "beam_job_id": beam_job,
+                    "label": label,
+                    "score_diff": value,
+                    "abs_score_diff": abs(value),
+                }
+                for value in score_diffs
+            )
     write_csv(
         output_dir / "beam_vs_greedy.csv",
         beam_rows,
@@ -1094,12 +1281,23 @@ def main() -> int:
             "left_missing_rate",
             "right_missing_rate",
             "mismatch_count",
+            "edit_distance_sample_size",
             "mean_mismatch_edit_distance",
             "median_mismatch_edit_distance",
             "median_score_diff",
             "median_abs_score_diff",
             "p90_abs_score_diff",
         ],
+    )
+    write_csv(
+        output_dir / "beam_vs_greedy_edit_distance_samples.csv",
+        beam_edit_rows,
+        ["input_format", "greedy_job_id", "beam_job_id", "label", "edit_distance"],
+    )
+    write_csv(
+        output_dir / "beam_vs_greedy_score_difference_samples.csv",
+        beam_score_rows,
+        ["input_format", "greedy_job_id", "beam_job_id", "label", "score_diff", "abs_score_diff"],
     )
     beam_plot_rows = [
         {"label": f"{row['input_format']} {row['beam_job_id']}", "changed_rate": 1 - float(row["exact_match_rate"])}
@@ -1115,7 +1313,7 @@ def main() -> int:
         "Changed rate",
     )
 
-    make_report(output_dir / "README.md", summary_rows, output_dir)
+    make_report(output_dir / "README.md", summary_rows, output_dir, args.max_edit_distance_samples)
     make_matplotlib_plots(
         output_dir,
         summary_rows,
@@ -1123,6 +1321,12 @@ def main() -> int:
         format_rows,
         refinement_rows,
         beam_rows,
+        format_edit_rows,
+        format_score_rows,
+        refinement_edit_rows,
+        refinement_score_rows,
+        beam_edit_rows,
+        beam_score_rows,
         by_config,
         all_mods,
     )
