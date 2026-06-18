@@ -9,6 +9,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import quote
 
@@ -42,6 +43,7 @@ def load_runner_module():
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot import {RUNNER_PATH}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
