@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://instadeep.aichor.ai/schema/latest/manifest.schema.json
+kind: AIchorManifest
+apiVersion: 0.2.3
+
+builder:
+  image: pdv-instanovo-prediction-samples
+  dockerfile: ./Dockerfile
+  context: .
+
+spec:
+  operator: pytorch
+  image: pdv-instanovo-prediction-samples
+  engineName: kyber
+  command: >
+    env
+    PDV_INSTANOVO_MAX_SPECTRA=10
+    PDV_INSTANOVO_BATCH_SIZE=512
+    PDV_INSTANOVO_NUM_WORKERS=4
+    PDV_INSTANOVO_CONTINUE_ON_ERROR=true
+    PDV_INSTANOVO_UPLOAD_PREFIX=instanovo-pdv-prediction-samples
+    PDV_INSTANOVO_MGF_URL=http://pdv.zhang-lab.org/data/download/test_data/msdata/SF_200217_U2OS_TiO2_HCD_OT_rep1.mgf.gz
+    PDV_INSTANOVO_MZML_URL=http://pdv.zhang-lab.org/data/download/test_data/msdata/SF_200217_U2OS_TiO2_HCD_OT_rep1.mzML.gz
+    /opt/instanovo-env/bin/python -u /workspace/aichor/generate_instanovo_predictions.py
+  timeout: "2d"
+
+  types:
+    worker:
+      count: 1
+      resources:
+        cpus: 24
+        ramRatio: 8
+        shmSizeGB: 32
+        accelerators:
+          gpu:
+            count: 1
+            type: gpu
+            product: NVIDIA-H100-80GB-HBM3
