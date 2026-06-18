@@ -132,7 +132,6 @@ def write_readme(output_dir: Path) -> Path:
                 "## Generation",
                 "",
                 "- Predictions were run on a `NVIDIA H100 80GB HBM3` GPU.",
-                "- The full run used `PDV_INSTANOVO_MAX_SPECTRA=0`, so no spectrum truncation was applied.",
                 "",
                 "The command table uses `<input>` and `<output>` placeholders for the concrete input and output paths inside the prediction runtime.",
                 "",
