@@ -186,7 +186,7 @@ def write_readme(output_dir: Path) -> Path:
             [
                 "# PDV InstaNovo v1+ Prediction Sample Files",
                 "",
-                "This dataset contains InstaNovo prediction CSV outputs generated from the MGF and mzML files for validating PDV InstaNovo import support.",
+                "This dataset contains InstaNovo prediction CSV outputs generated from the MGF and mzML input files listed below for validating PDV InstaNovo import support.",
                 "",
                 "The outputs were generated for both input file formats used for validation.",
                 "",
