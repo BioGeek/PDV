@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -75,11 +76,90 @@ def display_command(command: list[str], source_path: Path, output_path: Path) ->
     return shlex.join(displayed)
 
 
+def command_value(command: list[str], flag: str) -> str | None:
+    try:
+        index = command.index(flag)
+    except ValueError:
+        return None
+    next_index = index + 1
+    if next_index >= len(command):
+        return None
+    return command[next_index]
+
+
+def command_assignment(command: list[str], name: str) -> str | None:
+    prefix = f"{name}="
+    for token in command:
+        if token.startswith(prefix):
+            return token[len(prefix) :]
+    return None
+
+
+def checkpoint_version(value: str | None, prefix: str) -> str:
+    if not value:
+        return "-"
+    name = Path(value).name
+    if name.endswith(".ckpt"):
+        name = name[:-5]
+    if name.startswith(prefix):
+        return name[len(prefix) :]
+    return name
+
+
+def instanovo_checkpoint_version(job) -> str:
+    checkpoint = command_value(job.command, "-i") or command_assignment(job.command, "model_path")
+    if checkpoint:
+        return checkpoint_version(checkpoint, "instanovo-")
+    if job.depends_on is not None:
+        match = re.search(r"model-instanovo-(v[0-9]+(?:[.][0-9]+)*(?:-[A-Za-z0-9.]+)?)", job.depends_on.name)
+        if match:
+            return match.group(1)
+    return "-"
+
+
+def instanovo_software_version(job_id: str, package_version: str) -> str:
+    return package_version if "transformer" in job_id or "combined" in job_id or "plus-refined" in job_id else "-"
+
+
+def instanovoplus_software_version(job_id: str, package_version: str) -> str:
+    return package_version if "plus" in job_id or "combined" in job_id else "-"
+
+
+def prediction_mode(job_id: str) -> str:
+    if "combined" in job_id:
+        return "Transformer + InstaNovo+ refinement"
+    if "plus-refined" in job_id:
+        return "InstaNovo+ refinement"
+    if "plus-standalone" in job_id:
+        return "InstaNovo+ no refinement"
+    if "beams" in job_id:
+        return "Transformer beam search"
+    if "greedy" in job_id:
+        return "Transformer greedy"
+    return job_id
+
+
+def search_method(job_id: str) -> str:
+    if "beams" in job_id or "combined" in job_id:
+        return "beam search"
+    if "greedy" in job_id or "plus-refined" in job_id:
+        return "greedy"
+    return "-"
+
+
+def beam_count(job_id: str) -> str:
+    if "beams5" in job_id or "combined" in job_id:
+        return "5"
+    if "greedy" in job_id or "plus-refined" in job_id:
+        return "1"
+    return "-"
+
+
 def prediction_table() -> str:
     runner = load_runner_module()
     rows = [
-        "| Input | Prediction file | InstaNovo package | Job | Schema group | Command / flags |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| Input | Prediction file | InstaNovo software version | InstaNovo+ software version | InstaNovo checkpoint version | InstaNovo+ checkpoint version | Prediction mode | Search method | Beams | Command / flags |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     sources = [
         runner.SourceFile("full", "mgf", Path("/workspace/work/SF_200217_U2OS_TiO2_HCD_OT_rep1.full.mgf")),
@@ -87,15 +167,24 @@ def prediction_table() -> str:
     ]
     for source in sources:
         for job in runner.build_jobs(source):
+            instanovo_checkpoint = instanovo_checkpoint_version(job)
+            instanovoplus_checkpoint = checkpoint_version(
+                command_value(job.command, "-p"),
+                "instanovoplus-",
+            )
             rows.append(
                 "| "
                 + " | ".join(
                     [
                         source.source_format,
                         f"`{job.output_path.name}`",
-                        job.version,
-                        job.job_id,
-                        job.schema_group,
+                        instanovo_software_version(job.job_id, job.version),
+                        instanovoplus_software_version(job.job_id, job.version),
+                        instanovo_checkpoint,
+                        instanovoplus_checkpoint,
+                        prediction_mode(job.job_id),
+                        search_method(job.job_id),
+                        beam_count(job.job_id),
                         f"`{display_command(job.command, source.path, job.output_path)}`",
                     ]
                 )
