@@ -125,20 +125,6 @@ def instanovoplus_software_version(job_id: str, package_version: str) -> str:
     return package_version if "plus" in job_id or "combined" in job_id else "-"
 
 
-def prediction_mode(job_id: str) -> str:
-    if "combined" in job_id:
-        return "Transformer + InstaNovo+ refinement"
-    if "plus-refined" in job_id:
-        return "InstaNovo+ refinement"
-    if "plus-standalone" in job_id:
-        return "InstaNovo+ no refinement"
-    if "beams" in job_id:
-        return "Transformer beam search"
-    if "greedy" in job_id:
-        return "Transformer greedy"
-    return job_id
-
-
 def search_method(job_id: str) -> str:
     if "beams" in job_id or "combined" in job_id:
         return "beam search"
@@ -158,8 +144,8 @@ def beam_count(job_id: str) -> str:
 def prediction_table() -> str:
     runner = load_runner_module()
     rows = [
-        "| Input | Prediction file | InstaNovo software version | InstaNovo+ software version | InstaNovo checkpoint version | InstaNovo+ checkpoint version | Prediction mode | Search method | Beams | Command / flags |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Input | Prediction file | InstaNovo software version | InstaNovo+ software version | InstaNovo checkpoint version | InstaNovo+ checkpoint version | Search method | Beams | Command / flags |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     sources = [
         runner.SourceFile("full", "mgf", Path("/workspace/work/SF_200217_U2OS_TiO2_HCD_OT_rep1.full.mgf")),
@@ -182,7 +168,6 @@ def prediction_table() -> str:
                         instanovoplus_software_version(job.job_id, job.version),
                         instanovo_checkpoint,
                         instanovoplus_checkpoint,
-                        prediction_mode(job.job_id),
                         search_method(job.job_id),
                         beam_count(job.job_id),
                         f"`{display_command(job.command, source.path, job.output_path)}`",
