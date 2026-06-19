@@ -8,7 +8,6 @@ import json
 import os
 import shlex
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import quote
@@ -54,11 +53,6 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def run_command(command: list[str], cwd: Path | None = None) -> None:
-    print("+ " + shlex.join(command), flush=True)
-    subprocess.run(command, cwd=str(cwd) if cwd else None, check=True)
 
 
 def display_command(command: list[str], source_path: Path, output_path: Path) -> str:
@@ -143,8 +137,7 @@ def write_readme(output_dir: Path) -> Path:
                 "",
                 "## Files",
                 "",
-                "- `pdv-instanovo-v1plus-full-mgf-predictions.tar.zst`: full MGF prediction CSV outputs.",
-                "- `pdv-instanovo-v1plus-full-mzml-predictions.tar.zst`: full mzML prediction CSV outputs.",
+                "- `*.csv`: individual full prediction CSV outputs. File names include the input format, InstaNovo package version, model/checkpoint, and prediction/refinement options.",
                 "- `prediction_manifest.csv` and `prediction_manifest.json`: prediction runner output manifests.",
                 "- `SHA256SUMS`: checksums for uploaded files.",
                 "",
@@ -165,25 +158,17 @@ def copy_manifest_files(predictions_dir: Path, output_dir: Path) -> list[Path]:
     return copied
 
 
-def create_archive(predictions_dir: Path, output_dir: Path, source_format: str) -> Path:
-    source_dir = predictions_dir / "full" / source_format
-    if not source_dir.is_dir():
-        raise FileNotFoundError(f"Missing prediction directory: {source_dir}")
-    archive = output_dir / f"pdv-instanovo-v1plus-full-{source_format}-predictions.tar.zst"
-    if archive.exists():
-        archive.unlink()
-    run_command(
-        [
-            "tar",
-            "--zstd",
-            "-cf",
-            str(archive),
-            "-C",
-            str(predictions_dir),
-            f"full/{source_format}",
-        ]
-    )
-    return archive
+def copy_prediction_csvs(predictions_dir: Path, output_dir: Path) -> list[Path]:
+    copied: list[Path] = []
+    for source_format in ("mgf", "mzml"):
+        source_dir = predictions_dir / "full" / source_format
+        if not source_dir.is_dir():
+            raise FileNotFoundError(f"Missing prediction directory: {source_dir}")
+        for source in sorted(source_dir.glob("*.csv")):
+            target = output_dir / source.name
+            target.write_bytes(source.read_bytes())
+            copied.append(target)
+    return copied
 
 
 def write_checksums(paths: list[Path], output_dir: Path) -> Path:
@@ -198,12 +183,9 @@ def prepare_upload_files(predictions_dir: Path, output_dir: Path) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     readme = write_readme(output_dir)
     manifests = copy_manifest_files(predictions_dir, output_dir)
-    archives = [
-        create_archive(predictions_dir, output_dir, "mgf"),
-        create_archive(predictions_dir, output_dir, "mzml"),
-    ]
-    checksum = write_checksums([readme, *manifests, *archives], output_dir)
-    return [readme, *manifests, *archives, checksum]
+    prediction_csvs = copy_prediction_csvs(predictions_dir, output_dir)
+    checksum = write_checksums([readme, *manifests, *prediction_csvs], output_dir)
+    return [readme, *manifests, *prediction_csvs, checksum]
 
 
 def zenodo_headers(token: str) -> dict[str, str]:
