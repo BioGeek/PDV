@@ -307,7 +307,11 @@ def read_prediction_file(path: Path, meta: JobMeta) -> tuple[list[Prediction], i
             if peptide:
                 predictions.append(
                     Prediction(
-                        scan=get_scan(row, rows),
+                        # InstaNovo versions/formats do not agree on scan identifiers:
+                        # MGF files often carry ordinal scan numbers, while mzML files
+                        # carry instrument scan numbers. The generated CSV rows preserve
+                        # input spectrum order, so row ordinal is the stable comparison key.
+                        scan=str(rows),
                         peptide=peptide,
                         score=score,
                         score_column=score_column,
